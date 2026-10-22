@@ -13,7 +13,8 @@
  *   5. Tracks monthly water extent with Sentinel-2 (2019–present)
  *   6. Relates off-river water area to water-year precipitation and PDSI
  *      (TerraClimate)
- *   7. Exports rasters + CSV tables to Google Drive
+ *   7. Checks sensor consistency: Landsat 7 vs Landsat 8 alone, 2013–2021
+ *   8. Exports rasters + CSV tables to Google Drive
  *
  * Author: Uday Karmoker
  ******************************************************************************/
@@ -99,16 +100,22 @@ function prepTM(img) {
     .copyProperties(img, ['system:time_start']));
 }
 
-function landsat(start, end, region) {
-  var l9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
-    .filterBounds(region).filterDate(start, end).map(prepOLI);
-  var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
-    .filterBounds(region).filterDate(start, end).map(prepOLI);
-  var l7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
-    .filterBounds(region).filterDate(start, end).map(prepTM);
-  var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
-    .filterBounds(region).filterDate(start, end).map(prepTM);
-  return l9.merge(l8).merge(l7).merge(l5);
+var LANDSAT_SOURCES = {
+  L9: ['LANDSAT/LC09/C02/T1_L2', prepOLI],
+  L8: ['LANDSAT/LC08/C02/T1_L2', prepOLI],
+  L7: ['LANDSAT/LE07/C02/T1_L2', prepTM],
+  L5: ['LANDSAT/LT05/C02/T1_L2', prepTM]
+};
+
+// Merged Landsat collection; pass e.g. ['L7'] to use one sensor only
+function landsat(start, end, region, sensors) {
+  sensors = sensors || ['L9', 'L8', 'L7', 'L5'];
+  var col = ee.ImageCollection([]);
+  sensors.forEach(function (s) {
+    col = col.merge(ee.ImageCollection(LANDSAT_SOURCES[s][0])
+      .filterBounds(region).filterDate(start, end).map(LANDSAT_SOURCES[s][1]));
+  });
+  return col;
 }
 
 // ============================ SENTINEL-2 HELPERS =============================
@@ -172,9 +179,9 @@ var riverZone = ee.Image(0).byte()
 // ============================ AREA HELPERS ===================================
 
 var pixelHa = ee.Image.pixelArea().divide(10000);
-var AOI_HA  = AOI.area(1).divide(10000);
 
-// Water area (ha) by zone, and the share of the AOI with valid data
+// Water area (ha) by zone, and the share of the AOI with valid data.
+// The AOI area is summed from the same pixels so coverage cannot exceed 100%.
 function waterAreas(freq, scale) {
   var water = freq.gte(WATER_FREQ);
   var s = ee.Image.cat([
@@ -182,7 +189,8 @@ function waterAreas(freq, scale) {
     pixelHa.updateMask(freq.gte(PERMANENT_FREQ)).rename('permanent_ha'),
     pixelHa.updateMask(water.and(riverZone)).rename('river_ha'),
     pixelHa.updateMask(water.and(riverZone.not())).rename('offriver_ha'),
-    pixelHa.updateMask(freq.mask()).rename('valid_ha')
+    pixelHa.updateMask(freq.mask()).rename('valid_ha'),
+    pixelHa.clip(AOI).rename('aoi_ha')
   ]).reduceRegion({
     reducer: ee.Reducer.sum(),
     geometry: AOI,
@@ -195,7 +203,7 @@ function waterAreas(freq, scale) {
     permanent_ha: ee.Number(s.get('permanent_ha')).round(),
     river_ha: ee.Number(s.get('river_ha')).round(),
     offriver_ha: ee.Number(s.get('offriver_ha')).round(),
-    coverage_pct: ee.Number(s.get('valid_ha')).divide(AOI_HA).multiply(1000).round().divide(10)
+    coverage_pct: ee.Number(s.get('valid_ha')).divide(s.get('aoi_ha')).multiply(1000).round().divide(10)
   });
 }
 
@@ -359,18 +367,54 @@ print('Pearson r (water-year precipitation vs off-river water area)',
 print('Pearson r (season PDSI vs off-river water area)',
   climTable.reduceColumns(ee.Reducer.pearsonsCorrelation(), ['pdsi', 'offriver_ha']));
 
-print(ui.Chart.feature.byFeature(annualChartTable, 'year', ['offriver_ha', 'wy_precip_mm'])
-  .setChartType('LineChart')
+print(ui.Chart.feature.byFeature(climTable, 'pdsi', 'offriver_ha')
+  .setChartType('ScatterChart')
   .setOptions({
-    title: 'Off-river water (wetlands, sloughs, lakes) vs water-year precipitation',
+    title: 'Off-river water (wetlands, sloughs, lakes) vs season PDSI',
+    hAxis: {title: 'Mean PDSI, May–September'},
+    vAxis: {title: 'Off-river water (ha)'},
+    pointSize: 4,
+    legend: {position: 'none'},
+    colors: ['41ab5d']
+  }));
+
+// ============================ SENSOR CONSISTENCY CHECK =======================
+// Landsat 7 and 8 both imaged 2013–2021. Classifying each alone, on the pixels
+// both observed, shows whether adding OLI shifts the water area.
+
+var CHECK_START = 2013;
+var CHECK_END   = 2021;
+
+function sensorCheckTable(scale) {
+  return ee.FeatureCollection(ee.List.sequence(CHECK_START, CHECK_END).map(function (y) {
+    y = ee.Number(y);
+    var s = ee.Date.fromYMD(y, START_MONTH, 1);
+    var e = ee.Date.fromYMD(y, END_MONTH, 1).advance(1, 'month');
+    var f7 = waterFrequency(landsat(s, e, AOI, ['L7']), MIN_OBS).select('freq');
+    var f8 = waterFrequency(landsat(s, e, AOI, ['L8']), MIN_OBS).select('freq');
+    var common = f7.mask().and(f8.mask()).clip(AOI);
+    var a7 = waterAreas(f7.updateMask(common), scale);
+    var a8 = waterAreas(f8.updateMask(common), scale);
+    return ee.Feature(null, {
+      year: y,
+      common_coverage_pct: a7.get('coverage_pct'),
+      water_ha_L7: a7.get('water_ha'),
+      water_ha_L8: a8.get('water_ha'),
+      permanent_ha_L7: a7.get('permanent_ha'),
+      permanent_ha_L8: a8.get('permanent_ha'),
+      offriver_ha_L7: a7.get('offriver_ha'),
+      offriver_ha_L8: a8.get('offriver_ha')
+    });
+  }));
+}
+
+print(ui.Chart.feature.byFeature(sensorCheckTable(CHART_SCALE), 'year', ['water_ha_L7', 'water_ha_L8'])
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Open water from Landsat 7 vs Landsat 8 alone, same pixels',
     hAxis: {title: 'Year', format: '####'},
-    series: {
-      0: {targetAxisIndex: 0, color: '41ab5d'},
-      1: {targetAxisIndex: 1, color: '6baed6', lineDashStyle: [4, 4]}
-    },
-    vAxes: {0: {title: 'Off-river water (ha)'}, 1: {title: 'Precipitation, Oct–Sep (mm)'}},
-    lineWidth: 2,
-    pointSize: 3
+    vAxis: {title: 'Area (ha)'},
+    colors: ['2a78d6', 'eb6834']
   }));
 
 // ============================ PIXEL TREND ====================================
@@ -515,5 +559,15 @@ Export.table.toDrive({
   collection: transitionTable,
   description: 'jrc_transition_area',
   folder: EXPORT_FOLDER,
-  fileFormat: 'CSV'
+  fileFormat: 'CSV',
+  selectors: ['class', 'name', 'area_ha']
+});
+
+Export.table.toDrive({
+  collection: sensorCheckTable(SCALE),
+  description: 'sensor_check_L7_L8',
+  folder: EXPORT_FOLDER,
+  fileFormat: 'CSV',
+  selectors: ['year', 'common_coverage_pct', 'water_ha_L7', 'water_ha_L8',
+    'permanent_ha_L7', 'permanent_ha_L8', 'offriver_ha_L7', 'offriver_ha_L8']
 });

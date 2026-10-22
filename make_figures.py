@@ -25,8 +25,8 @@ d['precip_3yr_mm'] = d['wy_precip_mm'].rolling(3).sum()
 
 def mark_l8(ax):
     ax.axvline(L8_YEAR - 0.5, color=MUTED, lw=1, ls=':')
-    ax.text(L8_YEAR - 0.3, ax.get_ylim()[1] * 0.97, 'Landsat 8 added',
-            color=MUTED, fontsize=8, va='top')
+    ax.text(L8_YEAR - 0.3, ax.get_ylim()[1] * 0.35, 'Landsat 8\nadded',
+            color=MUTED, fontsize=8, va='center')
 
 
 # 1. Annual open water: Landsat vs JRC, and river vs off-river
