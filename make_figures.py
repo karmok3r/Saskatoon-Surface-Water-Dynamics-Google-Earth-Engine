@@ -1,10 +1,12 @@
 """Figures and summary statistics from the Earth Engine CSV exports.
 
 Usage: python make_figures.py   (run from the repo folder)
-Needs: pandas, matplotlib, scipy
+Needs: pandas, matplotlib, scipy, tifffile, imagecodecs
 """
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import tifffile
 from scipy import stats
 
 BLUE, ORANGE, AQUA = '#2a78d6', '#eb6834', '#1baf7a'
@@ -79,6 +81,69 @@ ax.set_title('Surface-water transitions, 1984–99 vs 2000–21 (JRC)', loc='lef
 fig.tight_layout()
 fig.savefig('jrc_transitions.png')
 
+# 4. Sensor check: Landsat 7 alone vs Landsat 8 alone
+sc = pd.read_csv('sensor_check_L7_L8.csv')
+sc['year'] = sc['year'].astype(int)
+fig, (a, b) = plt.subplots(1, 2, figsize=(9.5, 4))
+a.plot(sc.year, sc.water_ha_L8, color=ORANGE, lw=2, marker='o', ms=4, label='Landsat 8 only')
+a.plot(sc.year, sc.water_ha_L7, color=BLUE, lw=2, marker='o', ms=4, label='Landsat 7 only')
+a.set_ylim(0, None)
+a.set_ylabel('Open water (ha)')
+a.set_title('Same years, same pixels, two sensors', loc='left', color=INK)
+a.legend(loc='lower left')
+for col, color, name in [('water_ha', BLUE, 'Open water'), ('permanent_ha', ORANGE, 'Permanent water'),
+                         ('offriver_ha', AQUA, 'Off-river water')]:
+    b.plot(sc.year, sc[col + '_L8'] / sc[col + '_L7'], color=color, lw=2, marker='o', ms=4, label=name)
+b.axhline(1, color=MUTED, lw=1)
+b.set_ylim(0, None)
+b.set_ylabel('Landsat 8 / Landsat 7 area')
+b.set_title('Ratio', loc='left', color=INK)
+b.legend(loc='lower left')
+fig.tight_layout()
+fig.savefig('sensor_check_L7_L8.png')
+
+# 5. Sentinel-2 monthly water (2019 onwards)
+m = pd.read_csv('s2_monthly_water_area.csv')
+low = m.coverage_pct < 90
+cmap = plt.get_cmap('Blues')
+years = sorted(m.year.unique())
+fig, (a, b) = plt.subplots(1, 2, figsize=(9.5, 4), sharey=True)
+for ax, col, title in [(a, 'offriver_ha', 'Off-river'), (b, 'river_ha', 'River corridor')]:
+    for i, y in enumerate(years):
+        g = m[m.year == y]
+        ax.plot(g.month, g[col], color=cmap(0.35 + 0.65 * i / (len(years) - 1)), lw=2,
+                marker='o', ms=4, label=str(y))
+    ax.scatter(m.month[low], m[col][low], s=70, facecolor='none', edgecolor=INK, lw=1, zorder=3,
+               label='< 90% observed')
+    ax.set_xticks(range(5, 10), ['May', 'Jun', 'Jul', 'Aug', 'Sep'])
+    ax.set_title(title, loc='left', color=INK)
+    ax.set_ylim(0, None)
+a.set_ylabel('Open water (ha)')
+b.legend(loc='upper right', ncol=2, fontsize=8)
+fig.suptitle('Monthly open water from Sentinel-2', x=0.01, ha='left', color=INK)
+fig.tight_layout()
+fig.savefig('s2_monthly_water.png')
+
+# 6. Per-pixel trend map
+r = tifffile.imread(f'water_trend_1984_{d.year.max()}.tif')
+trend, river = r[..., 0], r[..., 5]
+km = 0.03   # 30 m pixels
+extent = [0, trend.shape[1] * km, 0, trend.shape[0] * km]
+fig, ax = plt.subplots(figsize=(8, 6.5))
+ax.imshow(np.where(np.isfinite(river), 1.0, np.nan), cmap='Greys', vmin=0, vmax=8, extent=extent,
+          interpolation='nearest')
+im = ax.imshow(np.ma.masked_invalid(trend), cmap='RdBu', vmin=-0.2, vmax=0.2, extent=extent,
+               interpolation='nearest')
+ax.contour(np.flipud(river == 1), levels=[0.5], colors=MUTED, linewidths=0.6, extent=extent)
+ax.grid(False)
+ax.set_xlabel('km')
+ax.set_ylabel('km')
+ax.set_title(f'Change in water frequency per decade, 1984–{d.year.max()} (Sen\'s slope)',
+             loc='left', color=INK)
+fig.colorbar(im, ax=ax, shrink=0.7, label='Frequency change per decade (blue = wetter)')
+fig.tight_layout()
+fig.savefig('water_trend_map.png')
+
 # Summary statistics
 print('Coverage (%):', d.coverage_pct.min(), '-', d.coverage_pct.max())
 for col in ['water_ha', 'offriver_ha', 'river_ha', 'jrc_water_ha']:
@@ -95,3 +160,13 @@ for x in ['wy_precip_mm', 'precip_3yr_mm', 'pdsi']:
         s = d.dropna(subset=[x])
         r = stats.pearsonr(s[x], s[y])
         print(f'{y} vs {x}: r={r.statistic:.2f}, p={r.pvalue:.4f}, n={len(s)}')
+for col in ['water_ha', 'permanent_ha', 'offriver_ha']:
+    ratio = sc[col + '_L8'] / sc[col + '_L7']
+    print(f'L8 / L7 {col}: mean {ratio.mean():.2f} ({ratio.min():.2f}-{ratio.max():.2f})')
+print('S2 mean by month (ha):')
+print(m.groupby('month')[['water_ha', 'offriver_ha', 'river_ha']].mean().round(0).to_string())
+q = m.groupby('year').water_ha.mean().to_frame('s2_ha').join(d.set_index('year').water_ha)
+print(f'S2 May-Sep mean / Landsat annual: {(q.s2_ha / q.water_ha).mean():.2f}')
+for name, mask in [('river', river == 1), ('off-river', river == 0)]:
+    t = trend[mask & np.isfinite(trend)]
+    print(f'Trend {name}: wetter {(t > 0.05).sum() * 0.09:,.0f} ha, drier {(t < -0.05).sum() * 0.09:,.0f} ha')
