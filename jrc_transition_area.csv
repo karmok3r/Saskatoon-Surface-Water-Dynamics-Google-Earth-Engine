@@ -1,0 +1,11 @@
+system:index,area_ha,class,name,.geo
+0,3400.0,1,Permanent,"{""type"":""MultiPoint"",""coordinates"":[]}"
+1,5107.0,2,New permanent,"{""type"":""MultiPoint"",""coordinates"":[]}"
+2,292.0,3,Lost permanent,"{""type"":""MultiPoint"",""coordinates"":[]}"
+3,1041.0,4,Seasonal,"{""type"":""MultiPoint"",""coordinates"":[]}"
+4,5697.0,5,New seasonal,"{""type"":""MultiPoint"",""coordinates"":[]}"
+5,351.0,6,Lost seasonal,"{""type"":""MultiPoint"",""coordinates"":[]}"
+6,1212.0,7,Seasonal to permanent,"{""type"":""MultiPoint"",""coordinates"":[]}"
+7,742.0,8,Permanent to seasonal,"{""type"":""MultiPoint"",""coordinates"":[]}"
+8,1259.0,9,Ephemeral permanent,"{""type"":""MultiPoint"",""coordinates"":[]}"
+9,7905.0,10,Ephemeral seasonal,"{""type"":""MultiPoint"",""coordinates"":[]}"
